@@ -1,175 +1,103 @@
 #!/bin/bash
-# Cleaned & Improved SSH-VPN Installer Script
-# Author: RosiVPN (modified)
-# ===============================================
+# Updated and secured version of ssh-vpn.sh for Ubuntu 22.04
+# By: ChatGPT with user request
 
-set -euo pipefail
+set -e
 
-# Configuration
 export DEBIAN_FRONTEND=noninteractive
 MYIP=$(wget -qO- ipinfo.io/ip)
 NET=$(ip -o -4 route show to default | awk '{print $5}')
-source /etc/os-release
-ver=$VERSION_ID
 
-# Company Details
-country=ID
-state=Indonesia
-locality=Indonesia
-organization=aryavpn
-organizationalunit=aryavpn
-commonname=aryavpn
-email=setyaaries9@gmail.com
+# Set time zone
+ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
 
-# Setup rc.local
-cat > /etc/systemd/system/rc-local.service <<-EOF
+# Update & Install Essentials
+apt update -y && apt upgrade -y
+apt install -y wget curl jq screen figlet lolcat stunnel4 fail2ban netfilter-persistent iptables-persistent nginx dropbear
+
+# Set SSH Configuration
+sed -i 's/^#Port 22/Port 22\nPort 2222/' /etc/ssh/sshd_config
+sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+sed -i 's/^AcceptEnv/#AcceptEnv/' /etc/ssh/sshd_config
+
+echo "Banner /etc/issue.net" >> /etc/ssh/sshd_config
+wget -q -O /etc/issue.net "https://raw.githubusercontent.com/Panwas89/asu/main/ssh/issue.net" || echo "Welcome to Secure Server" > /etc/issue.net
+chmod +x /etc/issue.net
+
+systemctl restart ssh
+
+# Configure Dropbear
+sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
+sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=143/' /etc/default/dropbear
+echo "/bin/false" >> /etc/shells
+echo "/usr/sbin/nologin" >> /etc/shells
+
+echo 'DROPBEAR_EXTRA_ARGS="-p 50000 -p 109 -p 110 -p 69"' >> /etc/default/dropbear
+systemctl enable dropbear
+systemctl restart dropbear
+
+# Configure Stunnel
+cat > /etc/stunnel/stunnel.conf <<EOF
+cert = /etc/stunnel/stunnel.pem
+client = no
+
+[ssh]
+accept = 443
+connect = 127.0.0.1:22
+EOF
+
+openssl req -new -x509 -days 1095 -nodes -out /etc/stunnel/stunnel.pem -keyout /etc/stunnel/stunnel.pem \
+-subj "/C=ID/ST=Indonesia/L=Indonesia/O=aryavpn/OU=aryavpn/CN=aryavpn/emailAddress=setyaaries9@gmail.com"
+
+sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4
+systemctl enable stunnel4
+systemctl restart stunnel4
+
+# BadVPN via systemd
+cat > /etc/systemd/system/badvpn.service <<EOF
 [Unit]
-Description=/etc/rc.local
-ConditionPathExists=/etc/rc.local
+Description=BadVPN UDPGW Service
+After=network.target
+
 [Service]
-Type=forking
-ExecStart=/etc/rc.local start
-TimeoutSec=0
-StandardOutput=tty
-RemainAfterExit=yes
-SysVStartPriority=99
+ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:7100 --max-clients 500
+Restart=always
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
-cat > /etc/rc.local <<-EOF
-#!/bin/sh -e
-# rc.local
-exit 0
-EOF
-
-chmod +x /etc/rc.local
-systemctl enable rc-local
-systemctl start rc-local.service
+chmod +x /usr/bin/badvpn-udpgw
+systemctl daemon-reexec
+systemctl enable badvpn
+systemctl start badvpn
 
 # Disable IPv6
-echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6
-grep -q 'disable_ipv6' /etc/rc.local || echo 'echo 1 > /proc/sys/net/ipv6/conf/all/disable_ipv6' >> /etc/rc.local
+sysctl -w net.ipv6.conf.all.disable_ipv6=1
+echo 'net.ipv6.conf.all.disable_ipv6 = 1' >> /etc/sysctl.conf
 
-# System update
-apt update -y && apt upgrade -y && apt dist-upgrade -y
-apt-get remove --purge -y ufw firewalld exim4
-
-# Install essentials
-apt install -y jq shc wget curl figlet ruby screen net-tools iptables-persistent fail2ban
-gem install lolcat
-ln -fs /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
-sed -i 's/AcceptEnv/#AcceptEnv/g' /etc/ssh/sshd_config
-
-# Configure SSH ports
-sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-for port in 22 200 500 51443 58080 40000; do
-  grep -q "Port $port" /etc/ssh/sshd_config || echo "Port $port" >> /etc/ssh/sshd_config
-done
-
-# Restart SSH
-systemctl restart ssh
-
-# Install Dropbear
-apt install -y dropbear
-sed -i 's/NO_START=1/NO_START=0/' /etc/default/dropbear
-sed -i 's/DROPBEAR_PORT=22/DROPBEAR_PORT=143/' /etc/default/dropbear
-echo 'DROPBEAR_EXTRA_ARGS="-p 50000 -p 109 -p 110 -p 69"' >> /etc/default/dropbear
-echo "/bin/false" >> /etc/shells
-echo "/usr/sbin/nologin" >> /etc/shells
-systemctl restart dropbear
-
-# Install Nginx
-apt install -y nginx
-rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-available/default
-wget -O /etc/nginx/nginx.conf "https://raw.githubusercontent.com/Panwas89/asu/main/ssh/nginx.conf"
-mkdir -p /home/vps/public_html
-systemctl restart nginx
-
-# Install BadVPN
-wget -O /usr/bin/badvpn-udpgw "https://raw.githubusercontent.com/Panwas89/asu/main/ssh/newudpgw"
-chmod +x /usr/bin/badvpn-udpgw
-for port in {7100..7900..100}; do
-  echo "screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:$port --max-clients 500" >> /etc/rc.local
-  screen -dmS badvpn badvpn-udpgw --listen-addr 127.0.0.1:$port --max-clients 500
-done
-
-# Install and configure Stunnel
-apt install -y stunnel4
-cat > /etc/stunnel/stunnel.conf <<-EOF
-cert = /etc/stunnel/stunnel.pem
-client = no
-socket = a:SO_REUSEADDR=1
-socket = l:TCP_NODELAY=1
-socket = r:TCP_NODELAY=1
-[ssh]
-accept = 445
-connect = 127.0.0.1:22
-[dropbear]
-accept = 777
-connect = 127.0.0.1:109
-[openvpn]
-accept = 442
-connect = 127.0.0.1:1194
-EOF
-
-openssl genrsa -out key.pem 2048
-openssl req -new -x509 -key key.pem -out cert.pem -days 1095 \
--subj "/C=$country/ST=$state/L=$locality/O=$organization/OU=$organizationalunit/CN=$commonname/emailAddress=$email"
-cat key.pem cert.pem > /etc/stunnel/stunnel.pem
-sed -i 's/ENABLED=0/ENABLED=1/' /etc/default/stunnel4
-systemctl restart stunnel4
-rm -f key.pem cert.pem
-
-# Block torrent traffic
-TORRENT_STRINGS=("get_peers" "announce_peer" "find_node" "BitTorrent" "BitTorrent protocol" "peer_id=" ".torrent" "announce.php?passkey=" "torrent" "announce" "info_hash")
-for string in "${TORRENT_STRINGS[@]}"; do
-  iptables -A FORWARD -m string --algo bm --string "$string" -j DROP
-done
+# Block Torrent
+iptables -A FORWARD -m string --string "BitTorrent" --algo bm -j DROP
 iptables-save > /etc/iptables.up.rules
-iptables-restore < /etc/iptables.up.rules
 netfilter-persistent save
 netfilter-persistent reload
 
-# Install DDoS Deflate
-if [ ! -d /usr/local/ddos ]; then
-  mkdir /usr/local/ddos
-  wget -q -O /usr/local/ddos/ddos.sh http://www.inetbase.com/scripts/ddos/ddos.sh
-  chmod 0755 /usr/local/ddos/ddos.sh
-  ln -s /usr/local/ddos/ddos.sh /usr/local/sbin/ddos
-  /usr/local/ddos/ddos.sh --cron > /dev/null 2>&1
-fi
+# Configure Fail2Ban
+systemctl enable fail2ban
+systemctl restart fail2ban
 
-# Setup cron jobs
-cat > /etc/cron.d/re_otm <<-EOF
-SHELL=/bin/sh
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-0 2 * * * root /sbin/reboot
-EOF
+# Setup Cron Job for Reboot & User Expiration (Optional)
+echo "0 2 * * * root /sbin/reboot" > /etc/cron.d/re_otm
+echo "0 0 * * * root /usr/bin/xp" > /etc/cron.d/xp_otm
 
-cat > /etc/cron.d/xp_otm <<-EOF
-SHELL=/bin/sh
-PATH=/usr/local/sbin:/usr/local/bin:/sbin:/bin:/usr/sbin:/usr/bin
-0 0 * * * root /usr/bin/xp
-EOF
-
-echo 7 > /home/re_otm
-systemctl restart cron
+# Restart Services
+systemctl restart ssh dropbear stunnel4 nginx fail2ban
 
 # Cleanup
 apt autoclean -y
-apt autoremove -y
 
-# Set permissions
-chown -R www-data:www-data /home/vps/public_html
-
-# Restart all services
-for svc in nginx openvpn ssh dropbear fail2ban stunnel4 vnstat squid; do
-  systemctl restart "$svc" || true
-done
-
-# Finalize
-history -c
-echo "unset HISTFILE" >> /etc/profile
 clear
-echo "Installation Complete."
+echo "====================================="
+echo "  SSH & VPN Server Setup Complete  "
+echo "     IP: $MYIP on Ubuntu 22.04       "
+echo "====================================="
